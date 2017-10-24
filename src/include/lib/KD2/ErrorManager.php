@@ -134,6 +134,8 @@ class ErrorManager
 		
 		if (in_array($error['type'], [E_ERROR, E_CORE_ERROR, E_COMPILE_ERROR, E_PARSE, E_RECOVERABLE_ERROR, E_USER_ERROR], TRUE))
 		{
+			// Don't exit at the end, as there might be other shutdown handlers
+			// after this one
 			self::exceptionHandler(new \ErrorException($error['message'], 0, $error['type'], $error['file'], $error['line']), false);
 		}
 	}
@@ -220,11 +222,10 @@ class ErrorManager
 				$from = !empty($_SERVER['SERVER_NAME']) ? $_SERVER['SERVER_NAME'] : basename($_SERVER['DOCUMENT_ROOT']);
 
 				$headers = [
-					'Subject'	=>	'Error ref ' . $ref,
-					'From' 		=>	'"' . $from . '" <' . self::$email_errors . '>',
+					'From' => sprintf('"%s" <%s>', $from, self::$email_errors),
 				];
 
-				error_log($log, 1, self::$email_errors, implode("\r\n", $headers));
+				mail(self::$email_errors, 'Error ref ' . $ref, $log, implode("\r\n", $headers));
 			}
 
 			// Disable any output if it was buffering
@@ -339,7 +340,12 @@ class ErrorManager
 	 */
 	static protected function getFileLocation($file)
 	{
-		return str_replace($_SERVER['DOCUMENT_ROOT'], '', $file);
+		if (!empty($_SERVER['DOCUMENT_ROOT']) && ($pos = strpos($file, $_SERVER['DOCUMENT_ROOT'])) === 0)
+		{
+			return substr($file, strlen($_SERVER['DOCUMENT_ROOT']));
+		}
+
+		return $file;
 	}
 
 	/**
@@ -366,8 +372,11 @@ class ErrorManager
 		foreach ($e->getTrace() as $i=>$t)
 		{
 			// Ignore the error stack from ErrorManager
-			if (isset($t['class']) && $t['class'] === __CLASS__ && ($t['function'] === 'shutdownHandler' || $t['function'] === 'errorHandler'))
+			if (isset($t['class']) && $t['class'] === __CLASS__ 
+				&& ($t['function'] === 'shutdownHandler' || $t['function'] === 'errorHandler'))
+			{
 				continue;
+			}
 
 			$nb_args = count($t['args']);
 
@@ -398,9 +407,13 @@ class ErrorManager
 				// Find arguments variables names via reflection
 				try {
 					if (isset($t['class']))
+					{
 						$r = new \ReflectionMethod($t['class'], $t['function']);
+					}
 					else
+					{
 						$r = new \ReflectionFunction($t['function']);
+					}
 					
 					$params = $r->getParameters();
 				}
@@ -423,7 +436,9 @@ class ErrorManager
 
 			// Display source code
 			if (isset($t['file']) && isset($t['line']))
+			{
 				echo self::htmlSource($t['file'], $t['line']);
+			}
 
 			echo '</article>';
 		}
@@ -437,7 +452,49 @@ class ErrorManager
 	 */
 	static public function htmlEnvironment()
 	{
+		$modules = [];
 
+		foreach (get_loaded_extensions() as $ext)
+		{
+			$modules[] = sprintf('%s (%s)', $ext, phpversion($ext));
+		}
+
+		$env = array_merge(self::$debug_env, [
+				'PHP version' => phpversion(),
+				'PHP modules' => implode(', ', $modules),
+			], $_SERVER);
+
+		$headers = function_exists('apache_request_headers') ? apache_request_headers() : [];
+
+		echo '<section><article>';
+
+		if ($headers)
+		{
+			echo '<h2>Request headers</h2>';
+			echo '<table>';
+			
+			foreach ($headers as $name => $value)
+			{
+				echo '<tr><th>' . htmlspecialchars($name) . '</th><td>' . htmlspecialchars($value) .'</td></tr>';
+			}
+
+			echo '</table>';
+		}
+
+		echo '<h2>Server config</h2>';
+		echo '<table>';
+
+		foreach ($env as $name => $value)
+		{
+			if (substr($name, 0, 5) == 'HTTP_' && $headers)
+			{
+				continue;
+			}
+
+			echo '<tr><th>' . htmlspecialchars($name) . '</th><td>' . htmlspecialchars($value) .'</td></tr>';
+		}
+
+		echo '</table></article></section>';
 	}
 
 	/**
@@ -486,8 +543,9 @@ class ErrorManager
 			'{$ref}' => $ref,
 		]);
 
-		$out = preg_replace_callback('!<if\((email|log)\)>(.*)</\1>!is', function ($match) {
-			return self::${$match[1]} ? $match[2] : '';
+		$out = preg_replace_callback('!<if\((email|log)\)>(.*?)</if>!is', function ($match) {
+			$criteria = ($match[1] == 'email') ? self::$email_errors : ini_get('error_log');
+			return (bool) $criteria ? $match[2] : '';
 		}, $out);
 
 		echo $out;
@@ -496,21 +554,21 @@ class ErrorManager
 	public static function errorTypeName($type)
 	{
 		$types = [
-			E_ERROR => 'Fatal error',
-			E_USER_ERROR => 'User error',
+			E_ERROR             => 'Fatal error',
+			E_USER_ERROR        => 'User error',
 			E_RECOVERABLE_ERROR => 'Recoverable error',
-			E_CORE_ERROR => 'Core error',
-			E_COMPILE_ERROR => 'Compile error',
-			E_PARSE => 'Parse error',
-			E_WARNING => 'Warning',
-			E_CORE_WARNING => 'Core warning',
-			E_COMPILE_WARNING => 'Compile warning',
-			E_USER_WARNING => 'User warning',
-			E_NOTICE => 'Notice',
-			E_USER_NOTICE => 'User notice',
-			E_STRICT => 'Strict standards',
-			E_DEPRECATED => 'Deprecated',
-			E_USER_DEPRECATED => 'User deprecated',
+			E_CORE_ERROR        => 'Core error',
+			E_COMPILE_ERROR     => 'Compile error',
+			E_PARSE             => 'Parse error',
+			E_WARNING           => 'Warning',
+			E_CORE_WARNING      => 'Core warning',
+			E_COMPILE_WARNING   => 'Compile warning',
+			E_USER_WARNING      => 'User warning',
+			E_NOTICE            => 'Notice',
+			E_USER_NOTICE       => 'User notice',
+			E_STRICT            => 'Strict standards',
+			E_DEPRECATED        => 'Deprecated',
+			E_USER_DEPRECATED   => 'User deprecated',
 		];
 		
 		return array_key_exists($type, $types) ? $types[$type] : 'Unknown error';
@@ -553,7 +611,8 @@ class ErrorManager
 			<pre id="icn"> \__/<br /> (xx)<br />//||\\\\</pre>');
 		}
 
-		register_shutdown_function([__CLASS__, 'shutdownHandler']);
+		register_shutdown_function([self::class, 'shutdownHandler']);
+
 		set_exception_handler([__CLASS__, 'exceptionHandler']);
 
 		// For PHP7 we don't need to throw ErrorException as all errors are thrown as Error
@@ -624,11 +683,6 @@ class ErrorManager
 	 */
 	static public function setEmail($email)
 	{
-		if (!filter_var($email, FILTER_VALIDATE_EMAIL))
-		{
-			throw new \InvalidArgumentException('Invalid email address: ' . $email);
-		}
-
 		self::$email_errors = $email;
 	}
 

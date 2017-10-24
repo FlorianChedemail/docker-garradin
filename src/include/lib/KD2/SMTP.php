@@ -34,6 +34,7 @@ class SMTP
 {
 	const NONE = 0;
 	const TLS = 1;
+	const STARTTLS = 1;
 	const SSL = 2;
 
 	const EOL = "\r\n";
@@ -199,10 +200,20 @@ class SMTP
 		}
 
 		$this->_write('RSET');
-		$this->_read();
+
+		$code = $this->_readCode();
+
+		if ($code != 250 && $code != 200)
+		{
+			throw new SMTP_Exception('SMTP RSET error: '.$this->last_line);
+		}
 
 		$this->_write('MAIL FROM: <'.$from.'>');
-		$this->_read();
+
+		if ($this->_readCode() != 250)
+		{
+			throw new SMTP_Exception('SMTP MAIL FROM error: '.$this->last_line);
+		}
 
 		if (is_string($to))
 		{
@@ -212,13 +223,29 @@ class SMTP
 		foreach ($to as $dest)
 		{
 			$this->_write('RCPT TO: <'.$dest.'>');
-			$this->_read();
+
+			$code = $this->_readCode();
+
+			if ($code != 250 && $code != 251)
+			{
+				throw new SMTP_Exception('SMTP RCPT TO error: '.$this->last_line);
+			}
 		}
 
 		$data = rtrim($data) . self::EOL;
 
+		// if first character of a line is a period, then append another period
+		// to avoid confusion with "end of data marker"
+		// see https://tools.ietf.org/html/rfc5321#section-4.5.2
+		$data = preg_replace('/^\./m', '..', $data);
+
 		$this->_write('DATA');
-		$this->_read();
+		
+		if ($this->_readCode() != 354)
+		{
+			throw new SMTP_Exception('SMTP DATA error: '.$this->last_line);
+		}
+
 		$this->_write($data . '.');
 
 		if ($this->_readCode() != 250)
@@ -242,7 +269,7 @@ class SMTP
 		// Parse $headers if it's a string
 		if (is_string($headers))
 		{
-			preg_match_all('/^(\\S.*?):(.*?)\\s*(?=^\\S|\\Z)/sm', $headers, $match);
+			preg_match_all('/^(\\S.*?):(.*?)\\s*(?=^\\S|\\Z)/sm', $headers, $match, PREG_SET_ORDER);
 			$headers = array();
 
 			foreach ($match as $header)
@@ -286,6 +313,13 @@ class SMTP
 			$headers['From'] = 'mail@'.$this->servername;
 		}
 
+		if (!isset($headers['Message-ID']))
+		{
+			// With headers + uniqid, it is presumed to be sufficiently unique
+			// so that two messages won't have the same ID
+			$headers['Message-ID'] = sha1(uniqid() . var_export($headers, true)) . '@' . $this->servername;
+		}
+
 		$content = '';
 
 		foreach ($headers as $name=>$value)
@@ -296,9 +330,6 @@ class SMTP
 		$content = trim($content) . self::EOL . self::EOL . $message . self::EOL;
 		$content = preg_replace("#(?<!\r)\n#si", self::EOL, $content);
 		$content = wordwrap($content, 998, self::EOL, true);
-
-		// SMTP Sender
-		$from = 'mail@'.$this->servername;
 
 		// Extract and filter recipients addresses
 		$to = self::extractEmailAddresses($to);
@@ -320,34 +351,8 @@ class SMTP
 			$headers['Bcc'] = implode(', ', $headers['Bcc']);
 		}
 
-		if (is_null($this->conn))
-		{
-			$this->connect();
-			$this->authenticate();
-		}
-
-		$this->_write('RSET');
-		$this->_read();
-
-		$this->_write('MAIL FROM: <'.$from.'>');
-		$this->_read();
-
-		foreach ($to as $dest)
-		{
-			$this->_write('RCPT TO: <'.$dest.'>');
-			$this->_read();
-		}
-
-		$this->_write('DATA');
-		$this->_read();
-		$this->_write($content . '.');
-
-		if ($this->_readCode() != 250)
-		{
-			throw new SMTP_Exception('Can\'t send message. SMTP said: ' . $this->last_line);
-		}
-
-		return true;
+		// Send email
+		return $this->rawSend($headers['From'], $to, $content);
 	}
 
 	/**
@@ -398,5 +403,3 @@ class SMTP
 		return $out;
 	}
 }
-
-?>

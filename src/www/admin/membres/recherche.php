@@ -1,15 +1,12 @@
 <?php
 namespace Garradin;
 
-require_once __DIR__ . '/../_inc.php';
+require_once __DIR__ . '/_inc.php';
 
-if ($user['droits']['membres'] < Membres::DROIT_ECRITURE)
-{
-    throw new UserException("Vous n'avez pas le droit d'accéder à cette page.");
-}
+$session->requireAccess('membres', Membres::DROIT_ECRITURE);
 
-$recherche = trim(Utils::get('r'));
-$champ = trim(Utils::get('c'));
+$recherche = trim(qg('r'));
+$champ = trim(qg('c'));
 
 $champs = $config->get('champs_membres');
 
@@ -21,7 +18,7 @@ if (!$champ)
     $auto = true;
 
     if (is_numeric(trim($recherche))) {
-        $champ = 'id';
+        $champ = 'numero';
     }
     elseif (strpos($recherche, '@') !== false) {
         $champ = 'email';
@@ -32,7 +29,7 @@ if (!$champ)
 }
 else
 {
-    if ($champ != 'id' && !$champs->get($champ))
+    if ($champ != 'numero' && !$champs->get($champ))
     {
         throw new UserException('Le champ demandé n\'existe pas.');
     }
@@ -44,24 +41,18 @@ if ($recherche != '')
 
     if (count($result) == 1 && $auto)
     {
-        Utils::redirect('/admin/membres/fiche.php?id=' . (int)$result[0]['id']);
+        Utils::redirect('/admin/membres/fiche.php?id=' . (int)$result[0]->id);
     }
 }
 
 $champs_liste = $champs->getList();
-
-$champs_liste = array_merge(
-    ['id' => ['title' => 'Numéro unique', 'type' => 'number']],
-    $champs_liste
-);
-
 $champs_entete = $champs->getListedFields();
 
-if (!array_key_exists($champ, $champs_entete))
+if (!isset($champs_entete->$champ))
 {
     $champs_entete = array_merge(
-        [$champ => $champs_liste[$champ]],
-        $champs_entete
+        [$champ => $champs_liste->$champ],
+        (array)$champs_entete
     );
 }
 
@@ -77,5 +68,3 @@ if ($recherche != '')
 $tpl->assign('recherche', $recherche);
 
 $tpl->display('admin/membres/recherche.tpl');
-
-?>

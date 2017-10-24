@@ -111,7 +111,12 @@ class Smartyer
 	protected $modifiers = [
 		'nl2br' => 'nl2br',
 		'count' => 'count',
-		'args' => 'sprintf',
+		'args' 	=> 'sprintf',
+		'const' => 'constant',
+		'trim' => 'trim',
+		'rtrim' => 'rtrim',
+		'ltrim' => 'ltrim',
+		'cat' 	=> [__CLASS__, 'concatenate'],
 		'escape' => [__CLASS__, 'escape'],
 		'truncate' => [__CLASS__, 'truncate'],
 		'replace' => [__CLASS__, 'replace'],
@@ -148,6 +153,17 @@ class Smartyer
 	 * @var array
 	 */
 	protected $foreachelse_stack = [];
+
+	/**
+	 * Throws a parse error if an invalid block is encountered
+	 * if set to FALSE, makes life easier for javascript, but this is a bit unreliable
+	 * as some JS code might look like smarty code and produce errors,
+	 * eg. variables: function () { $('.class').forEach(...
+	 * some functions: if (true) { if (ok) }
+	 * one solution is to append a comment line after opening brackets, or use {literal} blocks!
+	 * @var boolean
+	 */
+	public $error_on_invalid_block = true;
 
 	/**
 	 * Global parent path to templates
@@ -191,9 +207,9 @@ class Smartyer
 			throw new \RuntimeException($path . ' is not a directory.');
 		}
 
-		if (!is_writable($path))
+		if (!is_readable($path))
 		{
-			throw new \RuntimeException($path . ' is not writeable by ' . __CLASS__);
+			throw new \RuntimeException($path . ' is not readable by ' . __CLASS__);
 		}
 
 		self::$templates_dir = $path;
@@ -209,14 +225,25 @@ class Smartyer
 	{
 		if (is_null(self::$cache_dir))
 		{
-			throw new \LogicException('Cache path not set: call ' . __CLASS__ . '::setCachePath() first');
+			throw new \LogicException('Compile dir not set: call ' . __CLASS__ . '::setCompileDir() first');
 		}
 
-		$this->delimiter_start = preg_quote($this->delimiter_start, '#');
-		$this->delimiter_end = preg_quote($this->delimiter_end, '#');
+		$this->template_path = null;
 
-		$this->template_path = !is_null($template) ? self::$templates_dir . DIRECTORY_SEPARATOR . $template : null;
-		$this->compiled_template_path = self::$cache_dir . DIRECTORY_SEPARATOR . sha1($template) . '.phptpl';
+		if (!is_null($template))
+		{
+			// Don't prepend templates_dir for phar and absolute paths
+			if (substr($template, 0, 7) == 'phar://' || $template[0] == '/')
+			{
+				$this->template_path = $template;
+			}
+			else
+			{
+				$this->template_path = self::$templates_dir . DIRECTORY_SEPARATOR . $template;
+			}
+		}
+
+		$this->compiled_template_path = self::$cache_dir . DIRECTORY_SEPARATOR . sha1($template) . '.tpl.php';
 
 		// Register parent functions and variables locally
 		if ($parent instanceof Smartyer)
@@ -239,7 +266,7 @@ class Smartyer
 	{
 		$s = new Smartyer(null, $parent);
 		$s->source = $string;
-		$s->compiled_template_path = self::$cache_dir . DIRECTORY_SEPARATOR . sha1($string) . '.phptpl';
+		$s->compiled_template_path = self::$cache_dir . DIRECTORY_SEPARATOR . sha1($string) . '.tpl.php';
 		return $s;
 	}
 
@@ -290,7 +317,7 @@ class Smartyer
 	 * @param  string $path Path to templates dir
 	 * @return void
 	 */
-	public function precompileAll($templates_dir = null)
+	static public function precompileAll($templates_dir = null)
 	{
 		if (is_null($templates_dir))
 		{
@@ -369,6 +396,28 @@ class Smartyer
 	}
 
 	/**
+	 * Return assigned variables
+	 * @param  string|null $name name of the variable, if NULL then all variables are returned
+	 * @return mixed
+	 */
+	public function getTemplateVars($name = null)
+	{
+		if (!is_null($name))
+		{
+			if (array_key_exists($name, $this->variables))
+			{
+				return $this->variables[$name];
+			}
+			else
+			{
+				return null;
+			}
+		}
+
+		return $this->variables;
+	}
+
+	/**
 	 * Register a modifier function to the current template
 	 * @param  string|array  $name     Modifier name or associative array of multiple modifiers
 	 * @param  Callable|null $callback Valid callback if $name is a string
@@ -396,7 +445,7 @@ class Smartyer
 	 * @param  Callable|null $callback Valid callback if $name is a string
 	 * @return Smartyer
 	 */
-	public function register_function($name, Callable $callback)
+	public function register_function($name, Callable $callback = null)
 	{
 		if (is_array($name))
 		{
@@ -418,7 +467,7 @@ class Smartyer
 	 * @param  Callable|null $callback Valid callback if $name is a string
 	 * @return Smartyer
 	 */
-	public function register_block($name, Callable $callback)
+	public function register_block($name, Callable $callback = null)
 	{
 		if (is_array($name))
 		{
@@ -445,7 +494,19 @@ class Smartyer
 	 */
 	public function register_compile_function($name, Callable $callback)
 	{
-		$this->compile_functions[$name] = $callback->bindTo($this, $this);
+		// Try to bind the closure to the current smartyer object if possible
+		$is_bindable = (new \ReflectionFunction(@\Closure::bind($callback, $this)))->getClosureThis() != null; 
+
+		if ($is_bindable)
+		{
+			$this->compile_functions[$name] = $callback->bindTo($this, $this);
+		}
+		// This is a static closure, so no way to bind it
+		else
+		{
+			$this->compile_functions[$name] = $callback;
+		}
+
 		return $this;
 	}
 
@@ -466,9 +527,17 @@ class Smartyer
 		// Force new lines (this is to avoid PHP eating new lines after its closing tag)
 		$compiled = preg_replace("/\?>\n/", "$0\n", $compiled);
 
-		$compiled = '<?php /* Compiled from ' . $this->template_path . ' - ' . gmdate('Y-m-d H:i:s') . ' UTC */ '
-			. 'if (!isset($_i)) { $_i = []; } if (!isset($_blocks)) { $_blocks = []; } ?>'
-			. $compiled;
+		// Keep a trace of the source for debug purposes
+		$prefix = '<?php /* Compiled from ' . $this->template_path . ' - ' . gmdate('Y-m-d H:i:s') . ' UTC */ ';
+
+		// Stop execution if not in the context of Smartyer
+		// this is to avoid potential execution of template code outside of Smartyer
+		$prefix .= 'if (!isset($this) || !is_object($this) || !is_subclass_of($this, \'KD2\Smartyer\', true)) { die("Wrong call context."); } ';
+
+		// Initialize useful variables
+		$prefix .= 'if (!isset($_i)) { $_i = []; } if (!isset($_blocks)) { $_blocks = []; } ?>';
+
+		$compile = $prefix . $compiled;
 
 		// Write to temporary file
 		file_put_contents($this->compiled_template_path . '.tmp', $compiled);
@@ -495,11 +564,11 @@ class Smartyer
 			}
 
 			// Finding the original template line number
-			$source = explode("\n", $compiled);
-			$source = array_slice($source, $e->getLine());
-			$source = implode("\n", $source);
+			$compiled = explode("\n", $compiled);
+			$compiled = array_slice($compiled, $e->getLine()-1);
+			$compiled = implode("\n", $compiled);
 			
-			if (preg_match('!//#(\d+)\?>!', $source, $match))
+			if (preg_match('!//#(\d+)\?>!', $compiled, $match))
 			{
 				$this->parseError($match[1], $e->getMessage(), $e);
 			}
@@ -525,15 +594,28 @@ class Smartyer
 	 */
 	protected function parse($source)
 	{
-		$anti = $this->delimiter_start . $this->delimiter_end;
-		$pattern = '#' . $this->delimiter_start . '((?:[^' . $anti . ']|(?R))*?)' . $this->delimiter_end . '#i';
+		$literals = [];
+
+		$pattern = sprintf('/%s\*.*?\*%2$s|<\?(?:php|=).*?\?>|%1$sliteral%2$s.*?%1$s\/literal%2$s/s',
+			preg_quote($this->delimiter_start), preg_quote($this->delimiter_end));
+
+		// Remove literal blocks, PHP blocks and comments, to avoid interference with block parsing
+		$source = preg_replace_callback($pattern, function ($match) use (&$literals) {
+			$nb = count($literals);
+			$literals[$nb] = $match[0];
+			$returns = substr_count($match[0], "\n");
+			return '<?php/*#LITERAL#' . $nb . '#' . str_repeat("\n", $returns) .'#*/?>';
+		}, $source);
+
+		// Create block matching pattern
+		$anti = preg_quote($this->delimiter_start . $this->delimiter_end, '#');
+		$pattern = '#' . preg_quote($this->delimiter_start, '#') . '((?:[^' . $anti . ']|(?R))*?)' . preg_quote($this->delimiter_end, '#') . '#i';
 
 		$source = preg_split($pattern, $source, 0, PREG_SPLIT_OFFSET_CAPTURE | PREG_SPLIT_DELIM_CAPTURE);
 
 		unset($anti, $pattern);
 
 		$compiled = '';
-		$literal = false;
 
 		foreach ($source as $i=>$block)
 		{
@@ -547,31 +629,14 @@ class Smartyer
 				continue;
 			}
 
-			// Comments
-			if ($block[0] == '*' && substr($block, -1) == '*')
-			{
-				continue;
-			}
 			// Avoid matching JS blocks and others
-			elseif ($tblock == 'ldelim')
+			if ($tblock == 'ldelim')
 			{
-				$compiled .= stripslashes($this->delimiter_start);
+				$compiled .= $this->delimiter_start;
 			}
 			elseif ($tblock == 'rdelim')
 			{
-				$compiled .= stripslashes($this->delimiter_end);
-			}
-			elseif ($tblock == 'literal')
-			{
-				$literal = true;
-			}
-			elseif ($tblock == '/literal')
-			{
-				$literal = false;
-			}
-			elseif ($literal)
-			{
-				$compiled .= stripslashes($this->delimiter_start) . $block . stripslashes($this->delimiter_end);
+				$compiled .= $this->delimiter_end;
 			}
 			// Closing blocks
 			elseif ($tblock[0] == '/')
@@ -583,13 +648,47 @@ class Smartyer
 			{
 				$compiled .= $this->parseVariable($pos, $tblock);
 			}
+			elseif ($code = $this->parseBlock($pos, $tblock))
+			{
+				$compiled .= $code;
+			}
 			else
 			{
-				$compiled .= $this->parseBlock($pos, $tblock);
+				// Literal javascript / unknown block
+				$compiled .= $this->delimiter_start . $block . $this->delimiter_end;
 			}
 		}
 
-		unset($literal, $source, $i, $block, $tblock, $pos);
+		unset($source, $i, $block, $tblock, $pos);
+
+		// Include removed literals, PHP blocks etc.
+		foreach ($literals as $i=>$literal)
+		{
+			// Not PHP code: specific treatment
+			if ($literal[0] != '<')
+			{
+				// Comments
+				if (strpos($literal, $this->delimiter_start . '*') === 0)
+				{
+					// Remove
+					$literal = '';
+				}
+				// literals
+				else
+				{
+					$start_tag = $this->delimiter_start . 'literal' . $this->delimiter_end;
+					$end_tag = $this->delimiter_start . '/literal' . $this->delimiter_end;
+					$literal = substr($literal, strlen($start_tag), -(strlen($end_tag)));
+					unset($start_tag, $end_tag);
+				}
+			}
+			else
+			{
+				// PHP code, leave as is
+			}
+			
+			$compiled = preg_replace('/<\?php\/\*#LITERAL#' . $i . '#\s*?#\*\/\?>/', $literal, $compiled);
+		}
 
 		return $compiled;
 	}
@@ -618,7 +717,7 @@ class Smartyer
 		}
 
 		// Start counter
-		if ($name == 'foreach')
+		if ($name == 'foreach' || $name == 'for' || $name == 'while')
 		{
 			$code = '$_i[] = 0; ';
 		}
@@ -717,7 +816,7 @@ class Smartyer
 				// Let's try the user-defined compile callbacks
 				// and if none of them return something, we are out
 				
-				foreach ($this->compile_functions as $name=>$closure)
+				foreach ($this->compile_functions as $closure)
 				{
 					$code = call_user_func($closure, $pos, $block, $name, $raw_args);
 
@@ -729,12 +828,20 @@ class Smartyer
 			
 				if (!$code)
 				{
-					$this->parseError($pos, 'Unknown function or block: ' . $name);
+					if ($this->error_on_invalid_block)
+					{
+						$this->parseError($pos, 'Unknown function or block: ' . $name);
+					}
+					else
+					{
+						// Return raw source block, this is probably javascript
+						return false;
+					}
 				}
 			}
 		}
 
-		if ($name == 'foreach')
+		if ($name == 'foreach' || $name == 'for' || $name == 'while')
 		{
 			// Iteration counter
 			$code .= ' $iteration =& $_i[count($_i)-1]; $iteration++;';
@@ -766,7 +873,7 @@ class Smartyer
 					$name = 'if';
 				}
 
-				$code .= ' array_pop($_i);';
+				$code .= ' array_pop($_i); unset($iteration);';
 			case 'if':
 				$code = 'end' . $name . ';' . $code;
 				break;
@@ -824,7 +931,7 @@ class Smartyer
 	 */
 	protected function parseError($position, $message, $previous = null)
 	{
-		$line = substr_count(substr($this->source, 0, $position), "\n") + 1;
+		$line = substr_count($this->source, "\n", 0, $position) + 1;
 		throw new Smartyer_Exception($message, $this->template_path, $line, $previous);
 	}
 
@@ -900,10 +1007,12 @@ class Smartyer
 	 */
 	protected function parseSingleVariable($str, $tpl_pos = null, $escape = true)
 	{
-		$pos = strpos($str, '|');
+		// Split by pipe (|) except if enclosed in quotes
+		$modifiers = preg_split('/\|(?=(([^\'"]*["\']){2})*[^\'"]*$)/', $str);
+		$var = array_shift($modifiers);
 
 		// No modifiers: easy!
-		if ($pos === false)
+		if (count($modifiers) == 0)
 		{
 			$str = $this->exportArgument($str);
 
@@ -917,12 +1026,6 @@ class Smartyer
 			}
 		}
 
-		$var = substr($str, 0, $pos);
-
-		$modifiers = substr($str, $pos+1);
-
-		// Split by pipe (|) except if enclosed in quotes
-		$modifiers = preg_split('/\|(?=(([^\'"]*["\']){2})*[^\'"]*$)/', $modifiers);
 		$modifiers = array_reverse($modifiers);
 
 		$pre = $post = '';
@@ -1081,6 +1184,11 @@ class Smartyer
 	 */
 	static protected function escape($str, $type = 'html')
 	{
+		if ($type != 'json' && (is_array($str) || is_object($str)))
+		{
+			throw new \InvalidArgumentException('Invalid argument type for escape modifier: ' . gettype($str));
+		}
+
 		switch ($type)
 		{
 			case 'html':
@@ -1089,6 +1197,7 @@ class Smartyer
 			case 'xml':
 				return htmlspecialchars($str, ENT_XML1, 'UTF-8');
 			case 'htmlall':
+			case 'entities':
 				return htmlentities($str, ENT_QUOTES, 'UTF-8');
 			case 'url':
 				return rawurlencode($str);
@@ -1138,24 +1247,25 @@ class Smartyer
 	 * @param  string  $placeholder Placeholder text to append at the string if it has been cut
 	 * @param  boolean $strict_cut  If true then will cut in the middle of words
 	 * @return string 				String cut to $length or shorter
+	 * @example |truncate:10:" (click to read more)":true
 	 */
 	static protected function truncate($str, $length = 80, $placeholder = '…', $strict_cut = false)
 	{
 		// Don't try to use unicode if the string is not valid UTF-8
-		$u = preg_match('//u') ? 'u' : '';
+		$u = preg_match('//u', $str) ? 'u' : '';
 
 		// Shorter than $length + 1
-		if (!preg_match('/^.{' . ((int)$length + 1) . '}/' . $u, $str))
+		if (!preg_match('/^.{' . ((int)$length + 1) . '}/s' . $u, $str))
 		{
 			return $str;
 		}
 
 		// Cut at 80 characters
-		$str = preg_replace('/^(.{' . (int)$length . '}).*$/' . $u, '$1', $str);
+		$str = preg_replace('/^(.{0,' . (int)$length . '}).*$/s' . $u, '$1', $str);
 
 		if (!$strict_cut)
 		{
-			$str = preg_replace('/([\s.,:;!?]).*?$/' . $u, '$1', $str);
+			$str = preg_replace('/[^\s.,:;!?]*?$/s' . $u, '', $str);
 		}
 
 		return trim($str) . $placeholder;
@@ -1163,6 +1273,7 @@ class Smartyer
 
 	/**
 	 * Simple strftime wrapper
+	 * @example |date_format:"%F %Y"
 	 */
 	static protected function dateFormat($date, $format = '%b, %e %Y')
 	{
@@ -1171,7 +1282,22 @@ class Smartyer
 			$date = strtotime($date);
 		}
 
-		return strftime($date, $format);
+		if (strpos('DATE_', $format) === 0 && defined($format))
+		{
+			return date(constant($format), $date);
+		}
+
+		return strftime($format, $date);
+	}
+
+	/**
+	 * Concatenate strings (use |args instead!)
+	 * @return string
+	 * @example $var|cat:$b:"ok"
+	 */
+	static protected function concatenate()
+	{
+		return implode('', func_get_args());
 	}
 }
 
@@ -1187,4 +1313,3 @@ class Smartyer_Exception extends \Exception
 		$this->line = $line;
 	}
 }
-

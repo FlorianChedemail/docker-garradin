@@ -39,6 +39,7 @@ namespace KD2;
  */
 
 use KD2\MemCache;
+use IntlDateFormatter;
 
 class Translate
 {
@@ -90,6 +91,8 @@ class Translate
 	 */
 	static public function setLocale($locale)
 	{
+		\setlocale(LC_ALL, $locale);
+
 		$locale = strtok($locale, '@.-+=%:; ');
 
 		self::$locale = $locale;
@@ -106,7 +109,7 @@ class Translate
 	 * @param  string $directory Directory where translations will be stored
 	 * @return boolean
 	 */
-	static public function registerDomain($domain, $directory)
+	static public function registerDomain($domain, $directory = null)
 	{
 		if (!is_null($directory) && !is_readable($directory))
 		{
@@ -119,6 +122,18 @@ class Translate
 		if (is_null(self::$default_domain))
 		{
 			self::$default_domain = $domain;
+		}
+
+		return true;
+	}
+
+	static public function unregisterDomain($domain)
+	{
+		unset(self::$translations[$domain], self::$domains[$domain]);
+
+		if (self::$default_domain === $domain)
+		{
+			self::$default_domain = null;
 		}
 
 		return true;
@@ -159,13 +174,11 @@ class Translate
 		}
 
 		// Already loaded
-		if (isset(self::$translations[$domain][$locale]))
+		if (isset(self::$translations[$domain][$locale]) || isset(self::$translations[$domain][$locale_short]))
 		{
-			return true;
+			return $domain;
 		}
 
-		self::$translations[$domain][$locale] = [];
-		
 		// If this domain exists
 		if (isset(self::$domains[$domain]))
 		{
@@ -182,6 +195,8 @@ class Translate
 			throw new \InvalidArgumentException('Unknown gettext domain: ' . $domain);
 		}
 
+		self::$translations[$domain][$locale] = [];
+		
 		$cache_key = 'gettext_' . $domain . '_' . $locale;
 
 		// Try to fetch from cache
@@ -204,12 +219,12 @@ class Translate
 		else
 		{
 			// No directory found, don't fail, just fallback to msgids
-			return true;
+			return $domain;
 		}
 
 		// File path is domain_directory/locale/LC_MESSAGES/domain.mo
 		// example: myApp/fr_BE/LC_MESSAGES/errors.mo
-		$file = implode(DIRECTORY_SEPARATOR, [$dir, $locale, 'LC_MESSAGES', $domain]);
+		$file = implode(DIRECTORY_SEPARATOR, [$dir, 'LC_MESSAGES', $domain]);
 
 		if (file_exists($file . '.mo'))
 		{
@@ -220,7 +235,7 @@ class Translate
 			self::$translations[$domain][$locale] = self::parseGettextPOFile($file . '.po', true);
 		}
 
-		return true;
+		return $domain;
 	}
 
 	/**
@@ -232,6 +247,11 @@ class Translate
 	 */
 	static public function importTranslations($domain, $locale, Array $translations)
 	{
+		if (!array_key_exists($domain, self::$translations))
+		{
+			self::registerDomain($domain);
+		}
+
 		self::$translations[$domain][$locale] = $translations;
 	}
 
@@ -297,7 +317,7 @@ class Translate
 			$locale = substr($locale, 0, 2);
 		}
 
-		switch ($lang)
+		switch ($locale)
 		{
 			// Romanic family: french, brazilian portugese 
 			case 'fr':
@@ -367,28 +387,30 @@ class Translate
 	 */
 	static public function gettext($msgid1, $msgid2 = null, $n = null, $domain = null, $context = null)
 	{
-		self::_loadTranslations($domain);
-
-		if (!is_null($msgid2) && !is_null($n))
-		{
-			// Try to guess the plural form
-			if (($key = self::$_guessGettextPlural($rule, $n)) === false)
-			{
-				// Fallback to english
-				$key = ($n != 1) ? 1 : 0;
-			}
-		}
+		$domain = self::_loadTranslations($domain);
 
 		$id = $msgid1;
 
 		// Append context of the msgid
 		if (!is_null($context))
 		{
-			$id .= chr(4) . $context;
+			$id = $context . chr(4) . $id;
+		}
+
+		$locale_short = strtok(self::$locale, '_');
+		$str = null;
+
+		if (isset(self::$translations[$domain][self::$locale][$id]))
+		{
+			$str = self::$translations[$domain][self::$locale][$id];
+		}
+		elseif (isset(self::$translations[$domain][$locale_short][$id]))
+		{
+			$str = self::$translations[$domain][$locale_short][$id];
 		}
 
 		// No translations for this id
-		if (!isset(self::$translations[$domain][self::$locale][$id]))
+		if ($str === null)
 		{
 			if ($msgid2 !== null && $n !== null)
 			{
@@ -399,21 +421,21 @@ class Translate
 			return $msgid1;
 		}
 
-		$plural = !is_null($n) && !is_null($msgid2) ? self::guessPluralForm(self::$locale, $n) : 0;
+		$plural = !is_null($n) && !is_null($msgid2) ? self::_guessPlural(self::$locale, $n) : 0;
 
-		if (!isset(self::$translations[$domain][self::$locale][$id][$plural]))
+		if (!isset($str[$plural]))
 		{
 			// No translation for this plural form: fallback to first form
 			$plural = 0;
 		}
 
-		if (!isset(self::$translations[$domain][self::$locale][$id][$plural]))
+		if (!isset($str[$plural]))
 		{
 			// No translation for plural form, even after fallback, return msgid
 			return $plural ? $msgid2 : $msgid1;
 		}
 
-		return self::$translations[$domain][self::$locale][$id][$plural];
+		return $str[$plural];
 	}
 
 	/**
@@ -426,9 +448,9 @@ class Translate
 	 */
 	static public function string($msgid, Array $args = [], $domain = null, $context = null)
 	{
-		if (is_array($id))
+		if (is_array($msgid))
 		{
-			if (count($id) !== 3)
+			if (count($msgid) !== 3)
 			{
 				throw new \InvalidArgumentException('Invalid plural msgid: array should be [msgid, msgid_plural, count]');
 			}
@@ -438,7 +460,7 @@ class Translate
 		}
 		else
 		{
-			$str = self::gettext($id, null, null, $domain, $context);
+			$str = self::gettext($msgid, null, null, $domain, $context);
 		}
 
 		return self::named_sprintf($str, $args);
@@ -494,18 +516,17 @@ class Translate
 		$fp = fopen($path, 'rb');
 
 		// Read header
-		$header = fread($fp, 20);
-		$header = unpack('L1magic/L1version/L1count/L1o_msg/L1o_trn', $header);
+		$data = fread($fp, 20);
+		$header = unpack('L1magic/L1version/L1count/L1o_msg/L1o_trn', $data);
 		extract($header);
 
-		if ((dechex($magic) != "950412de") || ($version != 0))
+		if ((dechex($magic) != '950412de') || ($version != 0))
 		{
 			return false;
 		}
 
 		// Read the rest of the file
-		$data = fread($fp, 1<<20);
-		fclose($fp);
+		$data .= fread($fp, 1<<20);
 
 		if (!$data)
 		{
@@ -518,21 +539,17 @@ class Translate
 		for ($n = 0; $n < $count; $n++)
 		{
 			// msgid
-			$r = unpack('L1len/L1offs', substr($data, $o_msg + $n * 8, 8));
-			$msgid = substr($data, $r['offs'], $r['len']);
+			$r = unpack('L1length/L1offset', substr($data, $o_msg + $n * 8, 8));
+			$msgid = substr($data, $r['offset'], $r['length']);
 	
 			if (strpos($msgid, "\000")) {
 				list($msgid, $msgid_plural) = explode("\000", $msgid);
 			}
 	
 			// translation(s)
-			$r = unpack('L1len/L1offs', substr($data, $o_trn + $n * 8, 8));
-			$msgstr = substr($data, $r["offs"], $r["len"]);
+			$r = unpack('L1length/L1offset', substr($data, $o_trn + $n * 8, 8));
+			$msgstr = explode(chr(0), substr($data, $r['offset'], $r['length']));
 		
-			if (strpos($msgstr, "\000")) {
-				$msgstr = explode("\000", $msgstr);
-			}
-
 			$translations[$msgid] = $msgstr;
 	
 			if (isset($msgid_plural) && !$one_msgid_only)
@@ -568,7 +585,7 @@ class Translate
 			$space = strpos($line, " ");
 
 			// Ignore comments
-			if ($line[0] == "#")
+			if (substr($line, 0, 1) == "#")
 			{
 				continue;
 			}
@@ -588,16 +605,26 @@ class Translate
 				$msgctxt = trim(substr($line, $space + 1), '"');
 			}
 			// continued (could be _id or _str)
-			elseif ($line[0] == '"')
+			elseif (substr($line, 0, 1) == '"')
 			{
 				$line = trim($line, '"');
 
 				if ($i = count($msgstr))
 				{
+					if (!isset($msgstr[$i]))
+					{
+						$msgstr[$i] = '';
+					}
+
 					$msgstr[$i] .= $line;
 				}
 				elseif ($i = count($msgid))
 				{
+					if (!isset($msgid[$i]))
+					{
+						$msgid[$i] = '';
+					}
+
 					$msgid[$i] .= $line;
 				}
 				elseif ($msgctxt !== null)
@@ -607,7 +634,7 @@ class Translate
 			}
 
 			// Complete dataset: append to translations
-			if (count($msgid) && count($msgstr) && (empty($line) || ($line[0] == "#") || feof($f)) )
+			if (count($msgid) && count($msgstr) && (empty($line) || ($line[0] == "#") || feof($fp)))
 			{
 				$msgid[0] = strtr($msgid[0], $c_esc);
 
@@ -615,7 +642,7 @@ class Translate
 				// see https://secure.php.net/manual/fr/book.gettext.php#89975
 				if ($msgctxt !== null)
 				{
-					$msgid[0] .= chr(4) . $msgctxt;
+					$msgid[0] = $msgctxt . chr(4) . $msgid[0];
 				}
 
 				$translations[$msgid[0]] = [];
@@ -636,7 +663,7 @@ class Translate
 			}
 		} while (!feof($fp));
 
-		fclose($f);
+		fclose($fp);
 
 		return $translations;
 	}
@@ -705,12 +732,175 @@ class Translate
 	}
 
 	/**
-	 * Register a new template block in Smartyer to call KD2\Intl::gettext()
+	 * Locale-formatted strftime using IntlDateFormatter as a shim if the locale
+	 * is not installed
+	 * @param  string $format Date format
+	 * @param  integer $timestamp Timestamp
+	 * @param  string|DateTimeZone $timezone Timezone
+	 * @return string
+	 */
+	static public function strftime($format, $timestamp = null, $timezone = null)
+	{
+		// Use IntlDateFormatter to get locale time strings
+		// This is better than strftime because this doesn't depend on having
+		// the actual locale installed on the system
+		static $strftime_to_intl_format = [
+			'%a' => 'EEE',	// An abbreviated textual representation of the day	Sun through Sat
+			'%A' => 'EEEE',	// A full textual representation of the day	Sunday through Saturday
+			'%b' => 'MMM',	// Abbreviated month name, based on the locale	Jan through Dec
+			'%B' => 'MMMM',	// Full month name, based on the locale	January through December
+			'%h' => 'MMM',	// Abbreviated month name, based on the locale (an alias of %b)	Jan through Dec
+			'%p' => 'aa',	// UPPER-CASE 'AM' or 'PM' based on the given time	Example: AM for 00:31, PM for 22:23
+			'%P' => 'aa',	// lower-case 'am' or 'pm' based on the given time	Example: am for 00:31, pm for 22:23
+		];
+
+		if (null === $timestamp)
+		{
+			$timestamp = time();
+		}
+
+		if (!is_numeric($timestamp))
+		{
+			$timestamp = strtotime($timestamp);
+
+			if (false === $timestamp)
+			{
+				throw new \InvalidArgumentException('Timestamp argument is neither a valid UNIX timestamp or a valid date-time string.');
+			}
+		}
+
+		if (null === $timezone)
+		{
+			$timezone = date_default_timezone_get();
+		}
+
+		if (is_object($timezone) && $timezone instanceof \DateTimeZone)
+		{
+			$timezone = $timezone->getName();
+		}
+
+		if (!is_string($timezone))
+		{
+			throw new \InvalidArgumentException('Timezone argument is neither a string or DateTimeZone object.');
+		}
+
+		// Windows support shims
+		$format = str_replace('%e', date('j', $timestamp), $format);
+		$format = str_replace('%z', date('O', $timestamp), $format);
+		$format = str_replace('%Z', date('T', $timestamp), $format);
+
+		// get current locale
+		$locale = self::$locale ?: \setlocale(LC_TIME, 0);
+		$locale = substr(strtolower($locale), 0, 4);
+
+		$system_locale = substr(strtolower(\setlocale(LC_TIME, 0)), 0, 4);
+
+		$reset_timezone = null;
+
+		if (date_default_timezone_get() != $timezone)
+		{
+			$reset_timezone = date_default_timezone_get();
+			date_default_timezone_set($timezone);
+		}
+
+		// Fallback to IntlDateFormatter if the date locale is not installed/correctly set
+		// (and if Intl extension is installed)
+		if (class_exists('IntlDateFormatter') && $system_locale != $locale)
+		{
+			// helpful for conversion to ISO format
+			$format = str_replace('%r', '%I:%M:%S %p', $format);
+			
+			// %c = Preferred date and time stamp based on locale
+			// Example: Tue Feb 5 00:45:10 2009 for February 5, 2009 at 12:45:10 AM
+			$format = preg_replace_callback('/(?<!%)%c/', 
+				function ($match) use ($locale, $timestamp, $timezone) {
+					$dateFormat = new IntlDateFormatter($locale, 
+						IntlDateFormatter::LONG,
+						IntlDateFormatter::SHORT,
+						$timezone);
+					return $dateFormat->format($timestamp);
+				}, $format);
+
+			// %x = Preferred date representation based on locale, without the time
+			// Example: 02/05/09 for February 5, 2009
+			$format = preg_replace_callback('/(?<!%)%x/',
+				function ($match) use ($locale, $timestamp, $timezone) {
+					$dateFormat = new IntlDateFormatter($locale, 
+						IntlDateFormatter::SHORT,
+						IntlDateFormatter::NONE,
+						$timezone);
+					return $dateFormat->format($timestamp);
+				}, $format);
+
+			// Other locale-specific formats
+			$format = preg_replace_callback('/(?<!%)(%[aAbBhpP])/',
+				function ($match) use ($locale, $timestamp, $timezone, $strftime_to_intl_format) {
+					$dateFormat = new IntlDateFormatter($locale,
+						IntlDateFormatter::FULL,
+						IntlDateFormatter::FULL,
+						$timezone,
+						IntlDateFormatter::GREGORIAN,
+						$strftime_to_intl_format[$match[1]]);
+					return $dateFormat->format($timestamp);
+				}, $format);
+		}
+
+		// Use strftime
+		$out = \strftime($format, $timestamp);
+
+		if (null !== $reset_timezone)
+		{
+			date_default_timezone_set($reset_timezone);
+		}
+
+		return $out;
+	}
+
+	/**
+	 * Returns an associative array list of countries (ISO-3166:2013)
+	 *
+	 * @param  string $lang Language to use (only 'fr' and 'en' are available)
+	 * @return array
+	 */
+	static public function getCountriesList($lang = null)
+	{
+		if (null === $lang)
+		{
+			$lang = substr(self::$locale, 0, 2);
+		}
+
+		if ($lang != 'fr')
+		{
+			$lang = 'en';
+		}
+
+		$path = sprintf('%s/data/countries.%s.json', __DIR__, $lang);
+		$file = file_get_contents($path);
+
+		return json_decode($file, true);
+	}
+
+	/**
+	 * Register a new template block in Smartyer to call KD2Intl::gettext()
 	 * @param  Smartyer &$tpl Smartyer instance
 	 * @return Smartyer
 	 */
-	static public function registerSmartyerBlock(Smartyer &$tpl)
+	static public function extendSmartyer(Smartyer &$tpl)
 	{
+		$tpl->register_modifier('date_format', function ($timestamp, $format = '%c') {
+			if (!is_numeric($timestamp))
+			{
+				$timestamp = strtotime($timestamp);
+			}
+
+			if (strpos('DATE_', $format) === 0 && defined($format))
+			{
+				return date(constant($format), $timestamp);
+			}
+
+			return \KD2\Translate::strftime($format, $timestamp);
+		});
+
 		return (new Translate)->_registerSmartyerBlock($tpl);
 	}
 
@@ -761,21 +951,26 @@ class Translate
 
 			$args = $this->parseArguments($raw_args);
 
-			if ($nb_strings > 1 && empty($args['count']))
-			{
-				$this->parseError($pos, 'Multiple strings in translation block, but no \'count\' argument.');
-			}
-
-			$code = '';
+			$code = sprintf('\KD2\Translate::gettext(%s, ', var_export($strings[0], true));
 
 			if ($nb_strings > 1)
 			{
-				$code = '\KD2\ngettext(' . var_export($strings[0], true) . ', ' . var_export($strings[1], true) . ', (int) ' . $args['count'] . ')';
+				if (!isset($args['n']))
+				{
+					$this->parseError($pos, 'Multiple strings in translation block, but no \'n\' argument.');
+				}
+
+				$code .= sprintf('%s, (int) %s, ', var_export($strings[1], true), $args['n']);
 			}
 			else
 			{
-				$code = '\KD2\gettext(' . var_export($strings[0], true) . ')';
+				$code .= 'null, null, ';
 			}
+
+			// Add domain and context
+			$code .= sprintf('%s, %s)', 
+				isset($args['domain']) ? $args['domain'] : 'null',
+				isset($args['context']) ? $args['context'] : 'null');
 
 			$escape = $this->escape_type;
 
@@ -784,18 +979,18 @@ class Translate
 				$escape = strtolower($args['escape']);
 			}
 
-			unset($args['escape']);
+			unset($args['escape'], $args['domain'], $args['context']);
 
 			// Use named arguments: %name, %nb_apples...
 			// This will cause weird bugs if you use %s, or %d etc. before or between named arguments
 			if (!empty($args))
 			{
-				$code = '\KD2\Translate::named_vsprintf(' . $code . ', ' . $this->exportArguments($args) .')';
+				$code = sprintf('\KD2\Translate::named_sprintf(%s, %s)', $code, $this->exportArguments($args));
 			}
 
 			if ($escape != 'false' && $escape != 'off' && $escape !== '')
 			{
-				$code = 'self::escape(' . $code . ', ' . var_export($escape, true) . ')';
+				$code = sprintf('self::escape(%s, %s)', $code, var_export($escape, true));
 			}
 
 			return 'echo ' . $code . ';';
@@ -803,9 +998,25 @@ class Translate
 	}
 }
 
-// Gettext compatible functions
-// Just prefix calls to gettext functions by \KD2\
-// eg _("Hi!") => \KD2\_("Hi!")
+/*
+	Gettext compatible functions
+	Just prefix calls to gettext functions by \KD2\
+	eg _("Hi!") => \KD2\_("Hi!")
+	Or add at the top of your files:
+
+	// PHP 5.6
+	use function \KD2\_;
+	use function \KD2\gettext;
+	use function \KD2\ngettext;
+	use function \KD2\dgettext;
+	use function \KD2\dngettext;
+	use function \KD2\bindtextdomain;
+	use function \KD2\textdomain;
+	use function \KD2\setlocale;
+
+	// PHP 7+
+	use function \KD2\{_, gettext, ngettext, dgettext, dngettext, bindtextdomain, textdomain, setlocale}
+*/
 
 function _($id, Array $args = [], $domain = null)
 {

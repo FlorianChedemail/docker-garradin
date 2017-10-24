@@ -28,8 +28,6 @@
 
 namespace KD2;
 
-use KD2\Security;
-
 /**
  * Lightweight HOTP/TOTP library
  *
@@ -101,7 +99,7 @@ class Security_OTP
 
 		if (!is_null($code))
 		{
-			return Security::hash_equals(self::HOTP($secret, $count, null, $digits, $digest), $code);
+			return hash_equals(self::HOTP($secret, $count, null, $digits, $digest), (string) $code);
 		}
 
 		// Decodes the secret to binary
@@ -121,7 +119,7 @@ class Security_OTP
 			(ord($hmac[$offset + 2]) & 0xFF) << 8 |
 			(ord($hmac[$offset + 3]) & 0xFF);
 
-		return $code % pow(10, $digits);
+		return (string) ($code % pow(10, $digits));
 	}
 
 	/**
@@ -166,7 +164,7 @@ class Security_OTP
 		// Check supplied code
 		if (!is_null($code))
 		{
-			$check = Security::hash_equals(self::HOTP($secret, $counter, null, $digits, $digest), $code);
+			$check = hash_equals(self::HOTP($secret, $counter, null, $digits, $digest), (string) $code);
 
 			if ($check || empty($drift))
 			{
@@ -179,7 +177,7 @@ class Security_OTP
 
 			for ($i = $start; $i <= $end; $i++)
 			{
-				if (Security::hash_equals(self::HOTP($secret, $i, null, $digits, $digest), $code))
+				if (hash_equals(self::HOTP($secret, $i, null, $digits, $digest), $code))
 				{
 					return true;
 				}
@@ -210,6 +208,60 @@ class Security_OTP
 		}
 
 		return $string;
+	}
+
+	/**
+	 * Returns a valid otpauth:// URL from a secret
+	 * Useful to generate QRcodes
+	 *
+	 * @link  https://github.com/google/google-authenticator/wiki/Key-Uri-Format URI format
+	 *
+	 * @param  string $label Service label, eg 'Blog:james@alice.com'
+	 * @param  string $secret secret key
+	 * @param  string $type 'totp' or 'hotp'
+	 * @return string
+	 */
+	static public function getOTPAuthURL($label, $secret, $type = 'totp')
+	{
+		return 'otpauth://' . $type . '/' . rawurlencode($label) . '?secret=' . rawurlencode($secret);
+	}
+
+	/**
+	 * Returns UNIX timestamp from a NTP server (RFC 5905)
+	 *
+	 * @param  string  $host    Server host (default is pool.ntp.org)
+	 * @param  integer $timeout Timeout  in seconds (default is 5 seconds)
+	 * @return integer Number of seconds since January 1st 1970
+	 */
+	static public function getTimeFromNTP($host = 'pool.ntp.org', $timeout = 5)
+	{
+		$socket = stream_socket_client('udp://' . $host . ':123', $errno, $errstr, (int)$timeout);
+		stream_set_timeout($socket, $timeout);
+
+		$msg = "\010" . str_repeat("\0", 47);
+		fwrite($socket, $msg);
+
+		$response = fread($socket, 48);
+		fclose($socket);
+
+		if (strlen($response) < 1)
+		{
+			return false;
+		}
+
+		// unpack to unsigned long
+		$data = unpack('N12', $response);
+
+		// 9 =  Receive Timestamp (rec): Time at the server when the request arrived
+   		// from the client, in NTP timestamp format.
+		$timestamp = sprintf('%u', $data[9]);
+
+		// NTP = number of seconds since January 1st, 1900
+		// Unix time = seconds since January 1st, 1970
+		// remove 70 years in seconds to get unix timestamp from NTP time
+		$timestamp -= 2208988800;
+
+		return $timestamp;
 	}
 
 	/**
@@ -256,7 +308,7 @@ class Security_OTP
 	 * @param  boolean $pad Enable padding? if true will pad string to the nearest multiple of 8 length with '='
 	 * @return string       Base32 encoded string
 	 */
-	function base32_encode($str, $pad = true)
+	static public function base32_encode($str, $pad = true)
 	{
 		static $alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
