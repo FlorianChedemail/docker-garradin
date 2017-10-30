@@ -29,7 +29,11 @@ if (f('save') && $form->check('config'))
         {
             $config->set('couleur1', f('couleur1'));
             $config->set('couleur2', f('couleur2'));
-            $config->set('image_fond', f('image_fond'));
+
+            if (f('image_fond'))
+            {
+                $config->set('image_fond', f('image_fond'));
+            }
         }
         else
         {
@@ -51,14 +55,11 @@ if (f('save') && $form->check('config'))
 $tpl->assign('ok', qg('ok') !== null);
 
 $server_time = time();
-$ntp_time = \KD2\Security_OTP::getTimeFromNTP(NTP_SERVER);
-$diff = $server_time - $ntp_time;
 
 $tpl->assign('garradin_version', garradin_version() . ' [' . (garradin_manifest() ?: 'release') . ']');
 $tpl->assign('php_version', phpversion());
 $tpl->assign('has_gpg_support', \KD2\Security::canUseEncryption());
 $tpl->assign('server_time', $server_time);
-$tpl->assign('time_diff', $diff);
 
 $v = \SQLite3::version();
 $tpl->assign('sqlite_version', $v['versionString']);
@@ -68,7 +69,7 @@ $tpl->assign('pays', Utils::getCountryList());
 $cats = new Membres\Categories;
 $tpl->assign('membres_cats', $cats->listSimple());
 
-$tpl->assign('champs', $config->get('champs_membres')->getList(true));
+$tpl->assign('champs', $config->get('champs_membres')->getList());
 
 $tpl->assign('couleur1', $config->get('couleur1') ?: $couleur1);
 $tpl->assign('couleur2', $config->get('couleur2') ?: $couleur2);
