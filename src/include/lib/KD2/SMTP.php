@@ -351,10 +351,8 @@ class SMTP
 			$headers['Bcc'] = implode(', ', $headers['Bcc']);
 		}
 
-		$from = self::extractEmailAddresses($headers['From']);
-
 		// Send email
-		return $this->rawSend(current($from), $to, $content);
+		return $this->rawSend($headers['From'], $to, $content);
 	}
 
 	/**
